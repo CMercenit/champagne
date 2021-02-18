@@ -1,32 +1,21 @@
 from flask import Flask, render_template, request, redirect, url_for
 from flaskext.markdown import Markdown
-import pickle
-from os import path as os_path, mkdir as os_mkdir, remove as os_remove
 from datetime import datetime
 import sys, getopt
+import boto3
+from botocore.config import Config
 
 app = Flask("Champagne")
 Markdown(app)
-
-noteList = []
-
-noteDir = "notes"
-
-# create note directory if it doesn't exist
-if not os_path.exists(noteDir):
-    os_mkdir(noteDir)
-
-noteListFileName = os_path.join(noteDir, "notes.pkl")
-
-# check for existing file with note metadata
-if os_path.exists(noteListFileName):
-    with open(noteListFileName, 'rb') as notesFile:
-        noteList = pickle.load(notesFile)
-
+dynamodb = boto3.client('dynamodb', config=Config(region_name='us-east-1'))
 
 @app.route("/")
 def home():
-    return render_template("home.html", notes=noteList)
+    resp = dynamodb.scan(TableName='champagne')
+    notesList = []
+    for item in resp['Items']:
+        notesList.append({'id': item['note_id']['S'], 'title': item['title']['S'], 'lastModifiedDate': item['lastModifiedDate']['S'], 'message': item['message']['S']})
+    return render_template("home.html", notes=notesList)
 
 @app.route("/addNote")
 def addNote():
@@ -34,14 +23,7 @@ def addNote():
 
 @app.route("/createNote", methods=["post"])
 def createNote():
-    # get next note id
-    if len(noteList):
-        idList = [ int(i['id']) for i in noteList ]
-        noteId = str(max(idList)+1)
-    else:
-        noteId = "1"
-
-    noteFileName = os_path.join(noteDir, noteId+".pkl")
+    noteId = dynamodb.scan(TableName='champagne', Select='COUNT')['Count'] + 1
 
     lastModifiedDate = datetime.now()
     lastModifiedDate = lastModifiedDate.strftime("%d-%b-%Y %H:%M:%S")
@@ -49,37 +31,28 @@ def createNote():
     noteTitle = request.form['noteTitle']
     noteMessage = request.form['noteMessage']
 
-    note = {'id': noteId, 'title': noteTitle, 'lastModifiedDate': lastModifiedDate, 'message': noteMessage}
-
-    # save the note
-    with open(noteFileName, 'wb') as noteFile:
-        pickle.dump(note, noteFile)
-
-    # add metadata to list of notes for display on home page
-    noteList.append({'id': noteId, 'title': noteTitle, 'lastModifiedDate': lastModifiedDate})
-
-    # save changes to the file containing the list of note metadata
-    with open(noteListFileName, 'wb') as notesFile:
-        pickle.dump(noteList, notesFile)
+    dynamodb.put_item(TableName='champagne', Item={'note_id': {'S': str(noteId)}, 'title': {'S': noteTitle}, 'lastModifiedDate': {'S': lastModifiedDate}, 'message': {'S': noteMessage}})
 
     return redirect(url_for('viewNote', noteId=noteId))
 
 @app.route("/viewNote/<int:noteId>")
 def viewNote(noteId):
     noteId = str(noteId)
-    noteFileName = os_path.join(noteDir, noteId+".pkl")
-    with open(noteFileName, 'rb') as noteFile:
-        note = pickle.load(noteFile)
-
+    resp = dynamodb.get_item(TableName='champagne', Key={'note_id': {'S': str(noteId)}})
+    note = {'id' : resp['Item']['note_id']['S'], 
+            'title' : resp['Item']['title']['S'], 
+            'lastModifiedDate' : resp['Item']['lastModifiedDate']['S'], 
+            'message' : resp['Item']['message']['S']}
     return render_template("viewNote.html", note=note, submitAction="/saveNote")
 
 @app.route("/editNote/<int:noteId>")
 def editNote(noteId):
     noteId = str(noteId)
-    noteFileName = os_path.join(noteDir, noteId+".pkl")
-    with open(noteFileName, 'rb') as noteFile:
-        note = pickle.load(noteFile)
-
+    resp = dynamodb.get_item(TableName='champagne', Key={'note_id': {'S': str(noteId)}})
+    note = {'id' : resp['Item']['note_id']['S'], 
+            'title' : resp['Item']['title']['S'], 
+            'lastModifiedDate' : resp['Item']['lastModifiedDate']['S'], 
+            'message' : resp['Item']['message']['S']}
     cancelUrl = url_for('viewNote', noteId=noteId)
     return render_template("noteForm.html", headerLabel="Edit Note", note=note, submitAction="/saveNote", cancelUrl=cancelUrl)
 
@@ -92,43 +65,13 @@ def saveNote():
     noteTitle = request.form['noteTitle']
     noteMessage = request.form['noteMessage']
 
-    noteFileName = os_path.join(noteDir, noteId+".pkl")
-
-    note = {'id': noteId, 'title': noteTitle, 'lastModifiedDate': lastModifiedDate, 'message': noteMessage}
-
-    # save the note
-    with open(noteFileName, 'wb') as noteFile:
-        pickle.dump(note, noteFile)
-
-    # remove the old version of the note from the list of note metadata and add the new version
-    global noteList
-    newNoteList = [ i for i in noteList if not (i['id'] == noteId) ]
-    noteList = newNoteList
-
-    # add metadata to list of notes for display on home page
-    noteList.append({'id': noteId, 'title': noteTitle, 'lastModifiedDate': lastModifiedDate})
-
-    # save changes to the file containing the list of note metadata
-    with open(noteListFileName, 'wb') as notesFile:
-        pickle.dump(noteList, notesFile)
-
+    dynamodb.put_item(TableName='champagne', Item={'note_id': {'S': str(noteId)}, 'title': {'S': noteTitle}, 'lastModifiedDate': {'S': lastModifiedDate}, 'message': {'S': noteMessage}})
+    
     return redirect(url_for('viewNote', noteId=noteId))
 
 @app.route("/deleteNote/<int:noteId>")
 def deleteNote(noteId):
-    # delete the note file
-    noteFileName = os_path.join(noteDir, noteId+".pkl")
-    os_remove(noteFileName)
-
-    # remove the note from the list of note metadata
-    global noteList
-    newNoteList = [ i for i in noteList if not (i['id'] == noteId) ]
-    noteList = newNoteList
-
-    # save changes to the file containing the list of note metadata
-    with open(noteListFileName, 'wb') as notesFile:
-        pickle.dump(noteList, notesFile)
-
+    dynamodb.delete_item(TableName='champagne', Key={'note_id': {'S': str(noteId)}})
     return redirect("/")
 
 if __name__ == "__main__":
